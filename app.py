@@ -5,26 +5,25 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Setări pagină Streamlit
 st.set_page_config(page_title="Crypto Futures Scanner", layout="wide")
 
-# Endpoint-uri oficiale
 PHEMEX_REST = "https://api.phemex.com"
 VAPI_REST = "https://vapi.phemex.com"
 BINANCE_FUTURES_REST = "https://fapi.binance.com"
 BYBIT_REST = "https://api.bybit.com"
 
-HEADERS = {"User-Agent": "crypto-futures-scanner/10.0"}
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+# Header mai complet pentru a nu fi blocat pe servere cloud
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+}
 
 TF_MAP = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 TF_BINANCE = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d"}
 TF_BYBIT = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
 
-MAX_WORKERS = 15
+MAX_WORKERS = 8
 
-# --- Utilitare ---
 def safe_float(x):
     try: return float(x)
     except: return None
@@ -41,7 +40,7 @@ def human_num(x):
 
 def http_get_json(url, params=None, timeout=10):
     try:
-        r = SESSION.get(url, params=params, timeout=timeout)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         if r.status_code >= 400: return None
         return r.json()
     except:
@@ -66,18 +65,20 @@ def fetch_all_futures_symbols_and_tickers(exchange):
     if exchange == "Phemex Futures":
         j = http_get_json(f"{PHEMEX_REST}/md/v3/ticker/24hr/all")
         if j and j.get("result"):
-            for t in j["result"]:
-                sym = t.get("symbol", "")
-                if sym.endswith("USDT") or sym.startswith("c"):
-                    raw_turnover = safe_float(t.get("turnoverEv")) or safe_float(t.get("turnover")) or safe_float(t.get("volume24h"))
-                    if raw_turnover and raw_turnover > 1e7: raw_turnover /= 1e8
-                    open_p = safe_float(t.get("openPrice"))
-                    close_p = safe_float(t.get("closePrice")) or safe_float(t.get("lastPrice"))
-                    if open_p and open_p > 1e7: open_p /= 1e8
-                    if close_p and close_p > 1e7: close_p /= 1e8
-                    delta_24 = ((close_p - open_p) / open_p * 100.0) if (open_p and close_p and open_p > 0) else None
-                    out_tickers[sym] = {"turnoverRv": raw_turnover, "changePercent": delta_24}
-                    symbols_list.append(sym)
+            res = j["result"]
+            if isinstance(res, list):
+                for t in res:
+                    sym = t.get("symbol", "")
+                    if sym.endswith("USDT") or sym.startswith("c"):
+                        raw_turnover = safe_float(t.get("turnoverEv")) or safe_float(t.get("turnover")) or safe_float(t.get("volume24h"))
+                        if raw_turnover and raw_turnover > 1e7: raw_turnover /= 1e8
+                        open_p = safe_float(t.get("openPrice"))
+                        close_p = safe_float(t.get("closePrice")) or safe_float(t.get("lastPrice"))
+                        if open_p and open_p > 1e7: open_p /= 1e8
+                        if close_p and close_p > 1e7: close_p /= 1e8
+                        delta_24 = ((close_p - open_p) / open_p * 100.0) if (open_p and close_p and open_p > 0) else None
+                        out_tickers[sym] = {"turnoverRv": raw_turnover, "changePercent": delta_24}
+                        symbols_list.append(sym)
     elif exchange == "Binance Futures":
         j = http_get_json(f"{BINANCE_FUTURES_REST}/fapi/v1/ticker/24hr")
         if isinstance(j, list):
@@ -100,17 +101,17 @@ def fetch_all_futures_symbols_and_tickers(exchange):
 
 def fetch_klines(exchange, symbol, tf_str):
     if exchange == "Phemex Futures":
-        params = {"symbol": symbol, "resolution": TF_MAP.get(tf_str, 3600), "limit": 300}
+        params = {"symbol": symbol, "resolution": TF_MAP.get(tf_str, 3600), "limit": 200}
         for base in (VAPI_REST, PHEMEX_REST):
             j = http_get_json(base + "/exchange/public/md/v2/kline/last", params=params)
             if j and (j.get("code") == 0 or j.get("code") is None):
                 r = j.get("data", {}).get("rows") or j.get("rows") or []
                 if r: return r
     elif exchange == "Binance Futures":
-        j = http_get_json(f"{BINANCE_FUTURES_REST}/fapi/v1/klines", params={"symbol": symbol, "interval": TF_BINANCE.get(tf_str, "1h"), "limit": 200})
+        j = http_get_json(f"{BINANCE_FUTURES_REST}/fapi/v1/klines", params={"symbol": symbol, "interval": TF_BINANCE.get(tf_str, "1h"), "limit": 150})
         if isinstance(j, list): return [[item[0], 0, 0, item[1], item[2], item[3], item[4], item[5]] for item in j]
     elif exchange == "Bybit Futures":
-        j = http_get_json(f"{BYBIT_REST}/v5/market/kline", params={"category": "linear", "symbol": symbol, "interval": TF_BYBIT.get(tf_str, "60"), "limit": 200})
+        j = http_get_json(f"{BYBIT_REST}/v5/market/kline", params={"category": "linear", "symbol": symbol, "interval": TF_BYBIT.get(tf_str, "60"), "limit": 150})
         if j and j.get("retCode") == 0:
             list_data = j.get("result", {}).get("list", [])
             list_data.reverse()
@@ -149,23 +150,21 @@ def build_symbol_row(sym, exchange, tickers, tf_str):
         }
     except: return None
 
-# ==========================================
-# CACHE AUTOMAT SERVERSIDE (TTL = 60 Secunde)
-# ==========================================
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False)
 def get_cached_scan_data(exchange, tf_str):
     symbols, tickers = fetch_all_futures_symbols_and_tickers(exchange)
     results = []
+    # Limităm numărul de monede scanate per interogare pe serverul cloud pentru a preveni IP Ban
+    scan_symbols = symbols[:120] if len(symbols) > 120 else symbols
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(build_symbol_row, sym, exchange, tickers, tf_str): sym for sym in symbols}
+        futures = {executor.submit(build_symbol_row, sym, exchange, tickers, tf_str): sym for sym in scan_symbols}
         for f in as_completed(futures):
             res = f.result()
             if res: results.append(res)
     return pd.DataFrame(results)
 
-# ==========================================
-# INTERFAȚĂ UTILIZATOR
-# ==========================================
+# --- INTERFAȚĂ ---
 st.title("🚀 Real-Time Crypto Futures Scanner")
 
 col1, col2, col3 = st.columns([2, 2, 2])
@@ -174,15 +173,17 @@ with col1:
 with col2:
     tf_str = st.selectbox("Timeframe", list(TF_MAP.keys()), index=4)
 with col3:
-    st.caption("🔄 Datele se actualizează automat la fiecare 60s pe server.")
-    st.caption(f"Ultimul update: {time.strftime('%H:%M:%S')}")
+    st.write("")
+    if st.button("🔄 Force Refresh Cache"):
+        st.cache_data.clear()
+        st.rerun()
 
-# Preluare date din CACHE (fără apeluri repetate la API)
-with st.spinner("Se încarcă datele din cache-ul global..."):
+with st.spinner(f"Scanare {exchange} ({tf_str})... Te rugăm să aștepți..."):
     df = get_cached_scan_data(exchange, tf_str)
 
-if not df.empty:
-    # Opțiuni de Top-uri/Filtrare pentru utilizator
+if df.empty:
+    st.warning("⚠️ Nu s-au putut prelua date de la bursă (posibil limitare API temporară de pe IP-ul serverului). Încearcă să schimbi bursa pe Binance Futures sau Bybit Futures.")
+else:
     st.subheader("🔥 Top-uri & Filtrare")
     top_option = st.radio("Sortează după:", ["Volume (24H)", "Gaineri (% 24H)", "Loseri (% 24H)", "Rel Vol (Volum Neobișnuit)"], horizontal=True)
 
@@ -195,16 +196,14 @@ if not df.empty:
     elif top_option == "Rel Vol (Volum Neobișnuit)":
         df = df.sort_values(by="Rel Vol (TF)", ascending=False)
 
-    # Pregătire tabel afișabil
     display_df = df.copy()
     display_df["Vol 24H ($)"] = display_df["Vol 24H ($)"].apply(human_num)
     display_df["Price"] = display_df["Price"].apply(lambda x: f"${x:.4f}" if x >= 1 else f"${x:.7f}")
     display_df["Δ 24H (%)"] = display_df["Δ 24H (%)"].apply(lambda x: f"{x:+.2f}%" if pd.notnull(x) else "-")
-    display_df["Rel Vol (TF)"] = display_df["Rel Vol (TF)"].apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else "-")
+    display_df["Rel Vol (TF)"] = display_df["Rel Vol (TF)"] .apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else "-")
 
     st.dataframe(display_df.drop(columns=["raw_closes"]), use_container_width=True, height=450)
 
-    # Afișare Grafic la Selectarea Monedei
     st.divider()
     selected_symbol = st.selectbox("Selectează moneda pentru vizualizare grafic:", df["Symbol"].tolist())
     
